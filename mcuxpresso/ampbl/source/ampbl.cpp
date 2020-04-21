@@ -1,63 +1,142 @@
-/*
- * Copyright 2016-2018 NXP Semiconductor, Inc.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without modification,
- * are permitted provided that the following conditions are met:
- *
- * o Redistributions of source code must retain the above copyright notice, this list
- *   of conditions and the following disclaimer.
- *
- * o Redistributions in binary form must reproduce the above copyright notice, this
- *   list of conditions and the following disclaimer in the documentation and/or
- *   other materials provided with the distribution.
- *
- * o Neither the name of NXP Semiconductor, Inc. nor the names of its
- *   contributors may be used to endorse or promote products derived from this
- *   software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
- * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
- 
-/**
- * @file    ampbl.cpp
- * @brief   Application entry point.
- */
 #include <stdio.h>
 #include "board.h"
 #include "peripherals.h"
 #include "pin_mux.h"
 #include "clock_config.h"
 #include "MKL02Z4.h"
-/* TODO: insert other include files here. */
+#include "fsl_clock.h"
 
-/* TODO: insert other definitions and declarations here. */
+volatile uint32_t timer_counter = 0;
 
-/*
- * @brief   Application entry point.
- */
+void init_timer()
+{
+	CLOCK_EnableClock(kCLOCK_Lptmr0);
+
+	LPTMR0->CSR = 0;
+	LPTMR0->PSR = LPTMR_PSR_PRESCALE(1) | LPTMR_PSR_PCS(1); // LPO 1khz divide by 4
+	LPTMR0->CMR = 25; // 0.1 seconds
+	LPTMR0->CSR |= LPTMR_CSR_TIE_MASK | LPTMR_CSR_TEN_MASK;
+	NVIC_EnableIRQ(LPTMR0_IRQn);
+}
+
+extern "C" void LPTMR0_IRQHandler(void)
+{
+	timer_counter++;
+	LPTMR0->CSR |= LPTMR_CSR_TCF_MASK;
+}
+
+int enable_switch()
+{
+	return (BOARD_INITPINS_ENABLE_GPIO->PDIR & (1 << BOARD_INITPINS_ENABLE_PIN)) == 0;
+}
+
+void power_switch(int state)
+{
+	if (!state) {
+		BOARD_INITPINS_POWERSW_GPIO->PDDR |= 1 << BOARD_INITPINS_POWERSW_PIN;
+		BOARD_INITPINS_POWERSW_GPIO->PDOR &= ~(1 << BOARD_INITPINS_POWERSW_PIN);
+	}
+	else {
+		BOARD_INITPINS_POWERSW_GPIO->PDDR |= 1 << BOARD_INITPINS_POWERSW_PIN;
+		BOARD_INITPINS_POWERSW_GPIO->PDOR |= 1 << BOARD_INITPINS_POWERSW_PIN;
+	}
+}
+
+int red_led_on()
+{
+	return (BOARD_INITPINS_REDLED_GPIO->PDIR & (1 << BOARD_INITPINS_REDLED_PIN)) != 0;
+}
+
+int blue_led_on()
+{
+	return (BOARD_INITPINS_BLUELED_GPIO->PDIR & (1 << BOARD_INITPINS_BLUELED_PIN)) != 0;
+
+}
+
 int main(void) {
-  	/* Init board hardware. */
     BOARD_InitBootPins();
     BOARD_InitBootClocks();
     BOARD_InitBootPeripherals();
 
-    printf("Hello World\n");
+    init_timer();
 
-    /* Force the counter to be placed into memory. */
-    volatile static int i = 0 ;
-    /* Enter an infinite loop, just incrementing a counter. */
+    //printf("Hello World\n");
+
+    enum {
+    	state_startup,
+		state_powering_up,
+		state_power_on,
+		state_powering_down,
+		state_power_off
+    } state = state_startup;
+    uint32_t timer_start_count = timer_counter;
+
+	power_switch(0);
+
     while(1) {
-        i++ ;
+    	__WFE();
+
+    	if (state == state_startup) {
+    		if (timer_counter - timer_start_count < 4) {
+        		if (red_led_on()) {
+            		state = state_power_on;
+            		timer_start_count = timer_counter;
+        		}
+    			continue;
+    		}
+
+    		state = state_power_off;
+    		continue;
+    	}
+
+    	if (state == state_power_off) {
+    		if (timer_counter - timer_start_count < 5) {
+    			continue;
+    		}
+    		if (red_led_on()) {
+    			state = state_power_on;
+    			timer_start_count = timer_counter;
+        		power_switch(0);
+    		}
+    		else if (enable_switch()) {
+    			state = state_powering_up;
+    			timer_start_count = timer_counter;
+    			power_switch(1);
+    		}
+    		continue;
+    	}
+
+    	if (state == state_powering_up) {
+    		if (red_led_on()) {
+    			state = state_power_on;
+    			timer_start_count = timer_counter;
+        		power_switch(0);
+    		}
+    		continue;
+    	}
+
+    	if (state == state_power_on) {
+    		if (timer_counter - timer_start_count < 5) {
+    			continue;
+    		}
+    		if (!enable_switch()) {
+    			state = state_powering_down;
+    			timer_start_count = timer_counter;
+    			power_switch(1);
+    		}
+    		continue;
+    	}
+
+    	if (state == state_powering_down) {
+    		if (timer_counter - timer_start_count < 30) {
+    			continue;
+    		}
+    		state = state_power_off;
+			timer_start_count = timer_counter;
+			power_switch(0);
+    		continue;
+    	}
     }
-    return 0 ;
+
+    return 0;
 }

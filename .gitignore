@@ -1,3 +1,9 @@
 /mcuxpresso/.metadata/
 /mcuxpresso/ampbl/Debug
 /mcuxpresso/ampbl/.settings
+clock_config.c.bak
+clock_config.h.bak
+pin_mux.c.bak
+pin_mux.h.bak
+*.launch
+FreeRTOS_TAD_logs
